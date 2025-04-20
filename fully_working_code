@@ -1,0 +1,111 @@
+const express = require("express");
+const path = require("path");
+const multer = require("multer");
+const mongoose = require("mongoose");
+const { WebSocketServer } = require("ws");
+const http = require("http");
+
+const app = express();
+const PORT = 3000;
+
+// MongoDB connection
+const MONGO_URI = "mongodb://localhost:27017/lan_chat";
+mongoose
+  .connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(() => console.log("Connected to MongoDB"))
+  .catch((err) => console.error("MongoDB connection error:", err));
+
+// Define schema
+const fileSchema = new mongoose.Schema({
+  filename: String,
+  buffer: Buffer,
+  size: Number,
+  uploadDate: { type: Date, default: Date.now },
+});
+const File = mongoose.model("File", fileSchema);
+
+// Middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+app.use(express.static(path.join(__dirname, "public")));
+
+// Multer config
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB limit
+});
+
+// Serve HTML
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+// Upload endpoint
+app.post("/upload", upload.single("file"), async (req, res) => {
+  try {
+    const { originalname, buffer, size } = req.file;
+
+    const file = new File({
+      filename: originalname,
+      buffer,
+      size,
+    });
+
+    await file.save();
+    console.log("File uploaded:", file);
+
+    broadcastFile(file);
+
+    res.status(200).json({ message: "File uploaded successfully", file });
+  } catch (err) {
+    console.error("Error uploading file:", err);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
+// Download endpoint
+app.get("/download/:filename", async (req, res) => {
+  try {
+    const file = await File.findOne({ filename: req.params.filename });
+    if (!file) return res.status(404).send("File not found");
+
+    res.set({
+      "Content-Disposition": `attachment; filename="${file.filename}"`,
+      "Content-Type": "application/octet-stream",
+    });
+    res.send(file.buffer);
+  } catch (err) {
+    console.error("Error downloading file:", err);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
+// HTTP + WebSocket setup
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+// Broadcast helper
+function broadcastFile(file) {
+  const fileData = {
+    filename: file.filename,
+    size: file.size,
+    path: `/download/${encodeURIComponent(file.filename)}`,
+  };
+
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) {
+      client.send(JSON.stringify({ type: "file-shared", data: fileData }));
+    }
+  });
+}
+
+// WebSocket connection logging
+wss.on("connection", (ws) => {
+  console.log("New WebSocket connection");
+  ws.on("close", () => console.log("WebSocket disconnected"));
+});
+
+// Start server
+server.listen(PORT, () => {
+  console.log(`Server is running on http://localhost:${PORT}`);
+});
